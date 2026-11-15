@@ -123,6 +123,13 @@ class Isolated(unittest.TestCase):
         with patch.object(m,'send',side_effect=mailer.smtplib.SMTPAuthenticationError(535,b'test-secret')):m.deliver()
         self.assertFalse(m.state['last']['ok']);self.assertNotIn('test-secret',json.dumps(m.public()))
         self.assertEqual(m.state['pending'][0]['attempts'],1);self.assertGreater(m.state['pending'][0]['next'],time.time())
+    def test_dead_service_pid_does_not_keep_cached_running_state(self):
+        m=monitor.Monitor()
+        stale=dict(id='systemd:system:dead.service',name='dead.service',kind='systemd',pid=2147483647,state='active',autostart=False)
+        with patch.object(backends,'services',return_value=([stale],[])),patch.object(monitor,'firewall',return_value=dict(state='unknown',detail='',scope='test')):
+            d=m.collect()
+        service=next(s for s in d['services'] if s['id']==stale['id'])
+        self.assertFalse(service['running']);self.assertIsNone(service['pid'])
     def test_resource_groups_no_pid_overlap(self):
         m=monitor.Monitor()
         with patch.object(backends,'services',return_value=([],[])),patch.object(monitor,'firewall',return_value=dict(state='unknown',detail='',scope='test')):

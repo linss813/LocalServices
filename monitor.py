@@ -262,7 +262,7 @@ class Monitor:
             pids=g.get('pids',[]);covered.update(pids)
             s.update(cpu=g.get('cpu'),memory=g.get('memory',0),readRate=g.get('readRate'),writeRate=g.get('writeRate'),
                 ports=sorted({port for pid in pids for port in bypid.get(pid,[])}),uptime=max(0,int(time.time()-p['created'])) if p else None,
-                running=bool(p) or s.get('state') in ('active','running'),shared=len(roots.get(s.get('pid'),[]))>1,
+                running=bool(p) or (not s.get('pid') and s.get('state') in ('active','running')),shared=len(roots.get(s.get('pid'),[]))>1,
                 resourceId=g.get('id'),controllable=True)
             if not p:s['pid']=None
             s.pop('command',None);s.pop('cwd',None)
