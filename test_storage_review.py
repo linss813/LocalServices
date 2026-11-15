@@ -60,6 +60,14 @@ class StorageReview(unittest.TestCase):
             rows=[dict(name=n,readRate=10,writeRate=20) for n in ('vda','vda1','loop0','dm-0')]
             with patch.object(volumes,'Path',side_effect=path):result=volumes.aggregate_io(rows,'Linux')
             self.assertEqual(result['aggregateDevices'],['vda']);self.assertEqual(result['readRate'],10)
+    def test_integration_script_import_does_not_touch_network(self):
+        import importlib.util
+        import urllib.request
+        spec=importlib.util.spec_from_file_location('isolated_integration_script',Path(__file__).with_name('test_manager.py'))
+        module=importlib.util.module_from_spec(spec)
+        with patch.object(urllib.request,'urlopen',side_effect=AssertionError('network during import')):
+            spec.loader.exec_module(module)
+        self.assertTrue(callable(module.main))
     def test_slow_proxy_node_does_not_block_other_nodes(self):
         proxy=Nodes();entered=threading.Event();release=threading.Event();result=[]
         def request(node,path):
