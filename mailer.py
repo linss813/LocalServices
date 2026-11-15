@@ -32,6 +32,10 @@ class Mailer:
             changed=False
             known=set(self.state['sent'])|{x['key'] for x in self.state['pending']}
             for event in events:
+                if event.get('suppressed'):
+                    pending=[item for item in self.state['pending'] if not item['key'].startswith(event['id']+':')]
+                    if len(pending)!=len(self.state['pending']):self.state['pending']=pending;changed=True
+                    continue
                 if event['time']<cfg.get('enabledAt',0):continue
                 for state,stamp in [('触发',event['time']),('恢复',event.get('recovered'))]:
                     if not stamp:continue

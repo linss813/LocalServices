@@ -53,7 +53,9 @@ class Alerts:
         condition('cpu',h['cpu']>=rules['cpu'],'CPU 持续高占用',f"主机 CPU {h['cpu']:.1f}% ≥ {rules['cpu']}%")
         condition('memory',h['memoryPercent']>=rules['memory'],'内存持续高占用',f"内存 {h['memoryPercent']:.1f}% ≥ {rules['memory']}%")
         for disk in snapshot['disks']:
-            condition('disk:'+disk['mount'],disk['percent']>=rules['disk'],'磁盘空间不足',f"{disk['mount']} 使用 {disk['percent']}%",immediate=True,target=disk['mount'])
+            if not disk.get('alertable',True) and 'disk:'+disk['mount'] in self.active:
+                event=self.active['disk:'+disk['mount']];event['suppressed']=True;event['detail']='只读系统镜像不适用容量告警；已排除此项，原先的 100% 不是可写磁盘耗尽。'
+            condition('disk:'+disk['mount'],disk.get('alertable',True) and disk['percent']>=rules['disk'],'磁盘空间不足',f"{disk['mount']} 使用 {disk['percent']}%",immediate=True,target=disk['mount'])
         net=snapshot['network']
         rate=net['recvRate']+net['sentRate'] if net['recvRate'] is not None else None
         if rate is not None:condition('network',rate>=rules['networkMB']*1048576,'网络流量持续偏高',f"收发合计 {(rate or 0)/1048576:.2f} MB/s")
@@ -280,7 +282,7 @@ class Monitor:
             mounts.add(part.mountpoint)
             try:
                 usage=psutil.disk_usage(part.mountpoint)
-                disks.append(dict(device=part.device,mount=part.mountpoint,fstype=part.fstype,total=usage.total,used=usage.used,free=usage.free,percent=usage.percent))
+                disks.append(dict(device=part.device,mount=part.mountpoint,fstype=part.fstype,total=usage.total,used=usage.used,free=usage.free,percent=usage.percent,readOnly='ro' in part.opts.split(','),alertable='ro' not in part.opts.split(',') and part.fstype.lower() not in ('squashfs','iso9660','erofs')))
             except (PermissionError,OSError):pass
         net_items=[];stats=self.cached('interfaceStats',60,psutil.net_if_stats);addresses=self.cached('addresses',60,psutil.net_if_addrs)
         for name,io in psutil.net_io_counters(pernic=True).items():

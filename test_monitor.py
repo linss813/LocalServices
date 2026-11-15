@@ -61,6 +61,20 @@ class Isolated(unittest.TestCase):
         d['security']['firewall']=dict(state='disabled',detail='disabled')
         e.evaluate(d,now=0,wall=1);d['security']['firewall']['state']='unknown'
         e.evaluate(d,now=100,wall=2);self.assertEqual(len(e.active),1)
+    def test_readonly_disk_is_excluded_and_old_alert_is_suppressed(self):
+        engine=monitor.Alerts();d=self.sample();d['host']['cpu']=0
+        d['disks']=[dict(mount='/snap/core',percent=100)]
+        engine.evaluate(d,now=0,wall=1);self.assertEqual(len(engine.active),1)
+        d['disks'][0]['alertable']=False
+        events=engine.evaluate(d,now=1,wall=2)
+        self.assertFalse(engine.active);self.assertTrue(events[0]['suppressed']);self.assertEqual(events[0]['recovered'],2)
+        clean=monitor.Alerts();clean.events.clear();clean.active.clear();clean.pending.clear()
+        self.assertEqual(clean.evaluate(d,now=0),[])
+    def test_suppressed_disk_event_is_removed_from_mail_outbox(self):
+        self.config_email();m=mailer.Mailer()
+        event=dict(id='disk-event',title='Disk',detail='100%',time=100,recovered=None,level='warning')
+        m.enqueue_events([event]);self.assertEqual(len(m.state['pending']),1)
+        event.update(suppressed=True,recovered=200);m.enqueue_events([event]);self.assertFalse(m.state['pending'])
     def test_invalid_rules_are_atomic(self):
         e=monitor.Alerts();before=copy.deepcopy(e.rules)
         for value in (float('nan'),float('inf'),True,-1,101):
