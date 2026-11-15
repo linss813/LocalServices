@@ -3,7 +3,7 @@ const $=id=>document.getElementById(id);
 const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const colors=['#b6f171','#82b9ff','#c4a1f3','#f5ba76','#76d3cd','#647386'];
 const preference={get:key=>{try{return window.localStorage.getItem(key)}catch{return null}},set:(key,value)=>{try{window.localStorage.setItem(key,value)}catch{}}};
-const types={custom:'自定义服务',brew:'Homebrew',systemd:'systemd',windows:'Windows 服务',process:'端口进程 · 只读',group:'进程资源组 · 只读'};
+const types={custom:'自定义服务',brew:'Homebrew',launchd:'macOS 启动器',systemd:'systemd',windows:'Windows 服务',process:'端口进程 · 只读',group:'进程资源组 · 只读',socket:'未归属端口 · 只读'};
 let data=null,services=[],busy=false,refreshing=false,focused=null,currentView='overview',historyFollow=true,notified=null;
 let selectedNode=preference.get('localServiceNode')||'local',nodeList=[],sortAsc=preference.get('localServiceSortAsc')==='true',refreshSeq=0,aliasTarget=null,servicePage=1,runtimeMessage='';
 const display=s=>s.displayName||s.name;
@@ -13,7 +13,7 @@ const percent=n=>n==null?'采样中':n.toFixed(1)+'%';
 const duration=n=>n==null?'—':n<60?Math.floor(n)+' 秒':n<3600?Math.floor(n/60)+' 分':n<86400?Math.floor(n/3600)+' 时 '+Math.floor(n%3600/60)+' 分':Math.floor(n/86400)+' 天';
 const stamp=t=>t?new Date(t*1000).toLocaleString():'—';
 function metric(n,key){return key==='cpu'?percent(n):key==='memory'?bytes(n):rate(n)}
-async function api(path,body){const global=['nodes','node-add','node-remove'].includes(path);const response=await fetch('/api/'+path+(global?'':'?node='+encodeURIComponent(selectedNode)),body?{method:'POST',headers:{'Content-Type':'application/json','X-Manager-Token':token},body:JSON.stringify(body)}:{});const result=await response.json();if(!response.ok)throw Error(result.error||'请求失败');return result}
+async function api(path,body){const global=['nodes','node-add','node-remove','node-access'].includes(path);const response=await fetch('/api/'+path+(global?'':'?node='+encodeURIComponent(selectedNode)),body?{method:'POST',headers:{'Content-Type':'application/json','X-Manager-Token':token},body:JSON.stringify(body)}:{});const result=await response.json();if(!response.ok)throw Error(result.error||'请求失败');return result}
 function setView(view){currentView=view;document.querySelectorAll('.view').forEach(s=>s.hidden=s.id!==view);document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('selected',b.dataset.view===view));if(data)renderActiveView()}
 function focusGroup(id){focused=id;$('serviceScope').value='resources';$('search').value='';$('kind').value='';$('state').value='';setView('services');renderServices()}
 function donut(target,key){const all=data.resources.filter(g=>(g[key]||0)>0).sort((a,b)=>b[key]-a[key]);const sum=all.reduce((n,g)=>n+g[key],0);let slices=all.slice(0,5).map(g=>({...g}));const other=all.slice(5).reduce((n,g)=>n+g[key],0);if(other)slices.push({name:'其他可见进程',id:null,[key]:other});const C=2*Math.PI*72;let offset=0;
@@ -35,7 +35,7 @@ const pageCount=Math.max(1,Math.ceil(items.length/50));servicePage=Math.min(serv
 const shown=items.slice((servicePage-1)*50,servicePage*50);
 $('servicePageInfo').textContent='第 '+servicePage+' / '+pageCount+' 页 · 共 '+items.length+' 项（每页 50 项）';
 $('servicePrevious').disabled=servicePage<=1;$('serviceNext').disabled=servicePage>=pageCount;
-const watched=new Set(data.rules.watched);const control=Boolean(data.capabilities.control);$('rows').innerHTML=shown.map(s=>{const id=esc(s.id),disabled=busy?'disabled':'';return `<tr><td><div class="service-name"><div><div class="service" title="${esc(s.description)}">${esc(display(s))}</div><div class="tag service-sub identifier">${esc(s.name)}</div></div><button data-info="${id}">说明</button></div><div class="tag">${esc(types[s.kind]||s.kind)}${s.scope?' · '+esc(s.scope):''}${s.shared?' · 共享宿主资源':''}</div></td><td><span class="${s.running?'status':'stopped'}">● ${s.running?'运行中':'已停止'}</span><div class="tag">${s.pid?'PID '+s.pid:s.exitCode&&s.exitCode!=='0'&&s.exitCode!=='-'?'退出码 '+esc(s.exitCode):esc(s.state||'—')}</div></td><td class="port">${s.ports.join(' · ')||'—'}</td><td>${s.running?percent(s.cpu):'—'}</td><td>${s.running?bytes(s.memory):'—'}</td><td>${s.running?esc(rate(s.readRate))+'<br>'+esc(rate(s.writeRate)):'—'}</td><td>${duration(s.uptime)}</td><td>${['process','group'].includes(s.kind)?'—':`<div class="toggles"><label class="check"><input type="checkbox" data-id="${id}" data-op="autostart" ${s.autostart?'checked':''} ${disabled} ${!control||s.canAutostart===false?'disabled':''}>自启${!control?'（只读）':''}</label><label class="check"><input type="checkbox" data-id="${id}" data-op="watch" ${watched.has(s.id)?'checked':''} ${disabled}>离线告警</label></div>`}</td><td><div class="actions">${['process','group'].includes(s.kind)?'<small>系统发现</small>':!control?'<small>仅监控节点</small>':`<button data-id="${id}" data-op="${s.running?'stop':'start'}" ${disabled}>${s.running?'停止':'启动'}</button><button data-id="${id}" data-op="restart" ${disabled}>重启</button>${s.kind==='custom'?`<button data-id="${id}" data-op="logs">日志</button><button data-id="${id}" data-op="delete" ${disabled}>移除</button>`:''}`}</div></td></tr>`}).join('')}
+const watched=new Set(data.rules.watched);const control=Boolean(data.capabilities.control);$('rows').innerHTML=shown.map(s=>{const id=esc(s.id),disabled=busy?'disabled':'';return `<tr><td><div class="service-name"><div><div class="service" title="${esc(s.description)}">${esc(display(s))}</div><div class="tag service-sub identifier">${esc(s.name)}</div></div><button data-info="${id}">说明</button></div><div class="tag">${esc(types[s.kind]||s.kind)}${s.scope?' · '+esc(s.scope):''}${s.shared?' · 共享宿主资源':''}</div></td><td><span class="${s.running?'status':'stopped'}">● ${s.running?'运行中':'已停止'}</span><div class="tag">${s.pid?'PID '+s.pid:s.exitCode&&s.exitCode!=='0'&&s.exitCode!=='-'?'退出码 '+esc(s.exitCode):esc(s.state||'—')}</div></td><td class="port">${s.ports.join(' · ')||'—'}</td><td>${s.kind==='socket'?'不可用':s.running?percent(s.cpu):'—'}</td><td>${s.running?bytes(s.memory):'—'}</td><td>${s.running?esc(rate(s.readRate))+'<br>'+esc(rate(s.writeRate)):'—'}</td><td>${duration(s.uptime)}</td><td>${['process','group','socket'].includes(s.kind)?'—':`<div class="toggles"><label class="check"><input type="checkbox" data-id="${id}" data-op="autostart" ${s.autostart?'checked':''} ${disabled} ${!control||s.canAutostart===false?'disabled':''}>自启${!control?'（只读）':''}</label><label class="check"><input type="checkbox" data-id="${id}" data-op="watch" ${watched.has(s.id)?'checked':''} ${disabled}>离线告警</label></div>`}</td><td class="web-cell">${renderWebLinks(s)}</td><td><div class="actions">${['process','group','socket'].includes(s.kind)?'<small>系统发现</small>':!control?'<small>仅监控节点</small>':`<button data-id="${id}" data-op="${s.running?'stop':'start'}" ${disabled}>${s.running?'停止':'启动'}</button><button data-id="${id}" data-op="restart" ${disabled}>重启</button>${s.kind==='custom'?`<button data-id="${id}" data-op="logs">日志</button><button data-id="${id}" data-op="delete" ${disabled}>移除</button>`:''}`}</div></td></tr>`}).join('')}
 function renderNetwork(){const n=data.network;$('interfaces').innerHTML=n.interfaces.map(i=>`<tr><td>${esc(i.name)}<div class="tag ${i.up?'safe-text':''}">${i.up?'已连接':'未连接'}</div></td><td class="port">${i.addresses.map(esc).join('<br>')||'—'}</td><td>${rate(i.recvRate)}</td><td>${rate(i.sentRate)}</td><td>${bytes(i.recv)} / ${bytes(i.sent)}</td><td>${i.errors} / ${i.drops}</td><td>${i.speed>0?i.speed+' Mbps':'未知'}</td></tr>`).join('');$('listeners').innerHTML=data.security.listeners.map(l=>`<tr><td>${esc(l.name)}<div class="tag">PID ${l.pid||'未知'}</div></td><td>${esc(l.protocol)}</td><td class="port">${esc(l.address)}</td><td>${l.port}</td><td><span class="pill ${l.exposed?'warning':'safe'}">${l.exposed?'非回环绑定':'仅回环'}</span></td></tr>`).join('');$('connectionSummary').textContent=n.complete?Object.entries(n.connections).map(([k,v])=>k+': '+v).join(' · '):'连接总数不可用 · 仅展示可见监听端口'}
 function storageBytes(n){
  if(n==null)return '不可用';
@@ -131,15 +131,15 @@ async function operate(id,action,enabled){if(busy||!data)return;if(action==='del
 document.addEventListener('click',async event=>{const el=event.target.closest('[data-view],[data-close],[data-group],button[data-op],[data-ack]');if(el){if(el.dataset.view)setView(el.dataset.view);if(el.dataset.close)$(el.dataset.close).close();if(el.dataset.group)focusGroup(el.dataset.group);if(el.dataset.op)await operate(el.dataset.id,el.dataset.op);if(el.dataset.ack){try{await api('ack',{id:el.dataset.ack});await refresh()}catch(e){$('message').textContent=e.message}}}if(event.target.id==='clearFocus'){focused=null;servicePage=1;renderServices()}if(event.target.id==='testEmail'){event.target.disabled=true;try{await api('email-test',{});$('message').textContent='测试邮件已进入投递队列，请查看发送状态。';await refresh()}catch(e){$('message').textContent=e.message;event.target.disabled=false}}});
 document.addEventListener('keydown',e=>{if((e.key==='Enter'||e.key===' ')&&e.target.matches('circle[data-group]')){e.preventDefault();focusGroup(e.target.dataset.group)}});
 $('rows').addEventListener('change',async e=>{if(e.target.dataset.op)await operate(e.target.dataset.id,e.target.dataset.op,e.target.checked)});
-$('refresh').onclick=()=>refresh(true);$('openAdd').onclick=()=>$('add').showModal();['search','kind','state','serviceScope'].forEach(id=>$(id).addEventListener(id==='search'?'input':'change',()=>{servicePage=1;renderServices()}));$('rankMetric').onchange=ranking;$('trendMetric').onchange=()=>{historyFollow=true;trend()};$('historyCursor').oninput=()=>{historyFollow=Number($('historyCursor').value)===Number($('historyCursor').max);trend()};
-$('create').onsubmit=async e=>{e.preventDefault();const button=e.target.querySelector('.primary');button.disabled=true;try{const f=new FormData(e.target);await api('create',{name:f.get('name'),cwd:f.get('cwd'),command:JSON.parse(f.get('command'))});$('add').close();e.target.reset();$('formError').textContent='';$('message').textContent='已注册，请稍候等待列表更新，再点击启动。';setView('services');await refresh()}catch(e){$('formError').textContent=e.message}finally{button.disabled=false}};
+$('refresh').onclick=()=>refresh(true);$('openAdd').onclick=()=>{fillWebPreset(false);$('add').showModal()};['search','kind','state','serviceScope'].forEach(id=>$(id).addEventListener(id==='search'?'input':'change',()=>{servicePage=1;renderServices()}));$('rankMetric').onchange=ranking;$('trendMetric').onchange=()=>{historyFollow=true;trend()};$('historyCursor').oninput=()=>{historyFollow=Number($('historyCursor').value)===Number($('historyCursor').max);trend()};
+$('create').onsubmit=async e=>{e.preventDefault();const button=e.target.querySelector('.primary');button.disabled=true;try{const f=new FormData(e.target);const body={name:f.get('name'),cwd:f.get('cwd'),command:JSON.parse(f.get('command'))};if($('createType').value!=='custom')body.webAccess=$('createAccess').value;const result=await api('create',body);$('add').close();e.target.reset();$('formError').textContent='';$('message').textContent='已注册，启动后识别访问入口。'+(result.webBind?'监听地址：'+result.webBind:'');setView('services');await refresh()}catch(e){$('formError').textContent=e.message}finally{button.disabled=false}};
 $('openRules').onclick=()=>{if(!data)return;const f=$('rulesForm');for(const [key,value] of Object.entries(data.rules)){const el=f.elements.namedItem(key);if(!el)continue;if(el.type==='checkbox')el.checked=value;else el.value=value}$('rules').showModal()};
 $('rulesForm').onsubmit=async e=>{e.preventDefault();const button=e.target.querySelector('.primary');button.disabled=true;try{const values={...data.rules};for(const el of e.target.elements){if(!el.name)continue;values[el.name]=el.type==='checkbox'?el.checked:Number(el.value)}await api('rules',values);$('rules').close();$('rulesError').textContent='';$('message').textContent='告警阈值已保存';await refresh()}catch(e){$('rulesError').textContent=e.message}finally{button.disabled=false}};
 $('notification').onclick=async()=>{if(!('Notification' in window)){$('message').textContent='当前浏览器不支持桌面通知';return}const permission=await Notification.requestPermission();preference.set('localServiceNotifications',String(permission==='granted'));$('message').textContent=permission==='granted'?'已启用桌面通知（需要面板保持打开）；邮件由后台独立投递。':'通知未获授权，邮件告警仍会运行。'};
 initialize();setInterval(()=>{if(!document.hidden)refresh()},10000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh()});
-function visibleServices(){if(!data)return [];if($('serviceScope').value!=='resources')return services;return data.resources.map(g=>({...g,nativeKind:g.kind,kind:'group',aliasId:g.id,pid:g.pids.length===1?g.pids[0]:null,running:true,ports:[...new Set(services.filter(s=>s.resourceId===g.id).flatMap(s=>s.ports))],resourceId:g.id,autostart:null,uptime:null,state:g.pids.length+' 个进程'}))}
+function visibleServices(){if(!data)return [];if($('serviceScope').value!=='resources')return services;return data.resources.map(g=>({...g,nativeKind:g.kind,kind:'group',aliasId:g.id,pid:g.pids.length===1?g.pids[0]:null,running:true,ports:[...new Set(services.filter(s=>s.resourceId===g.id).flatMap(s=>s.ports))],resourceId:g.id,web:services.filter(s=>s.resourceId===g.id).flatMap(s=>s.web||[]),autostart:null,uptime:null,state:g.pids.length+' 个进程'}))}
 async function loadNodes(){const result=await api('nodes');nodeList=result.nodes;if(!nodeList.some(n=>n.id===selectedNode))selectedNode=nodeList[0]?.id||'';$('nodeSelect').innerHTML=nodeList.map(n=>`<option value="${esc(n.id)}">${esc(n.name)}</option>`).join('')||'<option value="">尚未连接节点</option>';$('nodeSelect').value=selectedNode;renderNodes();if(!selectedNode){document.body.classList.add('offline-overlay');$('nodeStatus').textContent='尚未连接监控代理，请通过“管理节点”添加。';$('openAdd').disabled=true}}
-function renderNodes(){$('nodeList').innerHTML=nodeList.map(n=>`<div class="node-row"><span><b>${esc(n.name)}</b><br><small>${esc(n.url)}</small></span>${n.id==='local'?'<small>内置</small>':`<button data-remove-node="${esc(n.id)}">移除连接</button>`}</div>`).join('')||'<p>还没有节点。</p>'}
+function renderNodes(){$('nodeList').innerHTML=nodeList.map(n=>`<div class="node-row"><span><b>${esc(n.name)}</b><br><small>${esc(n.url)}</small></span>${n.id==='local'?'<small>内置</small>':`<div><button data-node-access="${esc(n.id)}">访问主机</button> <button data-remove-node="${esc(n.id)}">移除连接</button></div>`}</div>`).join('')||'<p>还没有节点。</p>'}
 function setPalette(){const theme=document.documentElement.dataset.theme;colors.splice(0,colors.length,...(theme==='dark'?['#b3cc91','#9bbdd7','#b9a9ce','#d8b68a','#8fc1b5','#87949d']:['#527746','#3d729f','#80639f','#a06b34','#3e817c','#a0a196']))}
 function openInfo(id){const item=[...visibleServices(),...services,...data.resources].find(s=>s.id===id);if(!item)return;aliasTarget=item.aliasId||item.id;$('infoTitle').textContent=display(item);$('infoRaw').textContent='原始标识：'+item.name;$('infoDescription').textContent=item.description||'尚无用途说明';$('infoFacts').textContent=(item.nameSource||'原始标识')+' · 节点 '+(data.node?.name||selectedNode)+(item.pids?' · PID '+item.pids.slice(0,40).join(', ')+(item.pids.length>40?' …':''):item.pid?' · PID '+item.pid:'');const form=$('aliasForm');form.elements.name.value=item.nameSource==='自定义'?item.displayName:'';form.elements.description.value=item.nameSource==='自定义'?item.description:'';$('aliasError').textContent='';$('serviceInfo').showModal()}
 async function initialize(){setPalette();$('themeSelect').value=document.documentElement.dataset.theme||'comfort';$('fontSelect').value=preference.get('localServiceFont')||'15';const savedSort=preference.get('localServiceSort');if([...$('sort').options].some(o=>o.value===savedSort))$('sort').value=savedSort;sortLabel();try{await loadNodes();await refresh()}catch(e){$('message').textContent=e.message}}
@@ -159,3 +159,80 @@ function renderActiveView(){if(!data)return;({overview:()=>{donut('cpuDonut','cp
 $('storageScope').onchange=()=>{preference.set('storageScope:'+selectedNode,$('storageScope').value);renderStorageHeader();renderStorage()};
 $('servicePrevious').onclick=()=>{servicePage--;renderServices()};
 $('serviceNext').onclick=()=>{servicePage++;renderServices()};
+let webTarget=null;
+function webUrl(scheme,host,port){return scheme+'://'+(host.includes(':')?'['+host+']':host)+':'+port+'/'}
+function loopback(address){return address==='::1'||address.startsWith('127.')||address==='localhost'}
+function webLinks(entry){
+ const context=data.accessContext||{},local=context.viewerLocal===true,lan=data.webAccess?.lanAddresses||[];
+ const links=[];if(entry.customUrl)links.push({label:'自定义访问',url:entry.customUrl});
+ if(local){links.push({label:(loopback(entry.probeHost)?'访问 :':'局域网访问 :')+entry.port,url:webUrl(entry.scheme,entry.probeHost,entry.port)});}
+ else if(!loopback(entry.address)){
+  const host=context.accessHost||(!['*','0.0.0.0','::'].includes(entry.address)?entry.address:'');
+  if(host)links.push({label:'节点访问 :'+entry.port,url:webUrl(entry.scheme,host,entry.port)});
+ }
+ if(entry.publication)links.push({label:'局域网 :'+entry.publication.port,url:webUrl(entry.scheme,entry.publication.host,entry.publication.port)});
+ else if(!loopback(entry.address)){
+  const host=['*','0.0.0.0','::'].includes(entry.address)?lan[0]:lan.includes(entry.address)?entry.address:null;
+  if(host)links.push({label:'局域网 :'+entry.port,url:webUrl(entry.scheme,host,entry.port)});
+ }
+ return links.filter((l,i,a)=>a.findIndex(x=>x.url===l.url)===i);
+}
+function renderWebLinks(service){
+ const entries=service.web||[];if(!entries.length)return '<small>—</small>';
+ const unique=entries.filter((e,i,a)=>a.findIndex(x=>x.key===e.key)===i);
+ const links=unique.flatMap(webLinks).filter((l,i,a)=>a.findIndex(x=>x.url===l.url)===i);
+ return '<div class="web-links">'+links.slice(0,4).map(l=>`<a href="${esc(l.url)}" target="_blank" rel="noopener noreferrer" title="${esc(l.url)}">↗ ${esc(l.label)}</a>`).join('')+
+ (!links.length?'<small>仅节点本机，需转发或配置域名</small>':'')+
+ `<button data-web-info="${esc(service.id)}">访问设置${unique.length>1?' ('+unique.length+'端口)':''}</button></div>`;
+}
+function fillWebPreset(force){
+ if(!data)return;const type=$('createType').value;const command=$('serviceCommand');
+ if(force||!command.value){
+  const exe=data.capabilities.pythonExecutable||'/usr/bin/python3';
+  if(type==='python')command.value=JSON.stringify([exe,'-u','-m','http.server','8000','--bind',($('createAccess').value==='lan'&&data.webAccess?.lanAddresses?.[0])||'127.0.0.1']);
+  else if(force&&type==='vite')command.value=JSON.stringify(['/absolute/path/to/node','/absolute/path/to/vite/bin/vite.js','--port','5173','--host','127.0.0.1']);
+  else if(force&&type==='next')command.value=JSON.stringify(['/absolute/path/to/node','/absolute/path/to/next/dist/bin/next','dev','--port','3000','--hostname','127.0.0.1']);
+ }
+ $('createAccess').disabled=type==='custom';
+ const lan=data.webAccess?.lanAddresses||[];
+ $('createAccessInfo').textContent=type==='custom'?'普通命令保留自身网络配置。':$('createAccess').value==='local'?'仅监听 127.0.0.1。':lan.length?'启动时默认监听 '+lan[0]+'，不使用 0.0.0.0。':'当前未发现局域网地址，将回退到 127.0.0.1。';
+}
+function currentWeb(){return webTarget?.entries.find(e=>e.key===$('webEndpoint').value)}
+function updateWebDialog(){
+ const entry=currentWeb();if(!entry)return;const form=$('webForm');form.elements.url.value=entry.customUrl||'';
+ const links=webLinks(entry);$('webCurrent').textContent='监听 '+entry.address+':'+entry.port+' · '+entry.scheme.toUpperCase()+
+ (links.length?' · '+links.map(l=>l.url).join(' / '):' · 浏览器不能直接使用远程节点的 127.0.0.1');
+ const canPublish=data.capabilities.control&&loopback(entry.address)&&data.webAccess?.lanAddresses.length;
+ $('publishLan').disabled=!canPublish;$('publishLan').checked=Boolean(entry.publicationConfigured||entry.publication);
+ $('publishPort').value=entry.publication?.port||0;$('publishPort').disabled=!canPublish;
+ $('publishNote').textContent=!data.capabilities.control?'此节点仅监控，未开放局域网发布控制。':!loopback(entry.address)?'当前服务已监听网络地址，优先使用直连链接。':
+ !data.webAccess?.lanAddresses.length?'没有可用的局域网地址。':'仅绑定 '+data.webAccess.lanAddresses[0]+'。0 自动分配端口；原应用的登录、域名、回调限制仍由应用控制。';
+ if(entry.publicationError)$('publishNote').textContent+=' '+entry.publicationError;
+}
+function openWeb(id){
+ const service=[...visibleServices(),...services].find(s=>s.id===id);if(!service?.web?.length)return;
+ webTarget={id,entries:service.web.filter((e,i,a)=>a.findIndex(x=>x.key===e.key)===i)};
+ $('webTitle').textContent=display(service);$('webEndpoint').innerHTML=webTarget.entries.map(e=>`<option value="${esc(e.key)}">${e.scheme.toUpperCase()} ${e.address}:${e.port}</option>`).join('');
+ $('webError').textContent='';updateWebDialog();$('webDialog').showModal();
+}
+$('createType').onchange=()=>fillWebPreset(true);$('createAccess').onchange=()=>fillWebPreset(false);$('webEndpoint').onchange=updateWebDialog;
+$('webForm').onsubmit=async event=>{
+ event.preventDefault();const entry=currentWeb();if(!entry)return;const button=event.target.querySelector('.primary');button.disabled=true;let saved=false;
+ try{
+  await api('web-link',{key:entry.key,url:event.target.elements.url.value});saved=true;
+  const enabled=$('publishLan').checked,old=Boolean(entry.publicationConfigured||entry.publication);
+  const port=Number($('publishPort').value);
+  if(!$('publishLan').disabled&&(enabled!==old||enabled&&port!==entry.publication?.port))await api('web-publish',{key:entry.key,enabled,port,pid:entry.pid,created:entry.created});
+  $('webDialog').close();$('message').textContent='访问设置已保存；入口链接已更新。';await refresh(true);
+ }catch(e){$('webError').textContent=(saved?'地址已保存，局域网设置未完成：':'')+e.message}
+ finally{button.disabled=false}
+};
+document.addEventListener('click',async event=>{
+ const web=event.target.closest('[data-web-info]');if(web&&data)openWeb(web.dataset.webInfo);
+ const node=event.target.closest('[data-node-access]');if(node){
+  const entry=nodeList.find(n=>n.id===node.dataset.nodeAccess);if(!entry)return;
+  const host=prompt('浏览器访问此节点时使用的 IP 或域名（不含协议、端口；留空清除）：',entry.accessHost||'');
+  if(host===null)return;
+  try{await api('node-access',{id:entry.id,accessHost:host});await loadNodes();await refresh(true);$('message').textContent='节点访问主机已保存'}catch(e){$('message').textContent=e.message}
+ }
+});

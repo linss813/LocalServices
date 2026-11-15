@@ -3,6 +3,7 @@ import gzip
 import ipaddress
 import json
 import secrets
+import re
 import threading
 import time
 from urllib.parse import urlsplit
@@ -28,14 +29,24 @@ def validate_url(url):
     if port is not None and not 1<=port<=65535:raise ValueError('端口无效')
     return url.rstrip('/')
 
+def access_host(value):
+    if not isinstance(value,str):raise ValueError('访问主机无效')
+    value=value.strip().strip('[]')
+    if not value:return ''
+    try:ipaddress.ip_address(value);return value
+    except ValueError:pass
+    if len(value)>253 or not re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?',value):raise ValueError('访问主机仅填写 IP 或域名，不包含协议或端口')
+    return value
+
 class Nodes:
     def __init__(self):self.cache={};self.node_locks={};self.lock=threading.RLock();self.opener=build_opener(NoRedirect,ProxyHandler({}))
-    def list(self):return [dict(id=n['id'],name=n['name'],url=n['url']) for n in read('nodes.json',[])]
+    def list(self):return [dict(id=n['id'],name=n['name'],url=n['url'],accessHost=n.get('accessHost','')) for n in read('nodes.json',[])]
     def add(self,body):
         name=body.get('name','');token=body.get('token','');url=body.get('url','')
         if not isinstance(name,str) or not name.strip() or len(name)>80 or any(c in name for c in '\r\n'):raise ValueError('节点名称应为 1–80 字')
         if not isinstance(token,str) or not 24<=len(token)<=512 or any(c.isspace() for c in token):raise ValueError('请填写代理生成的有效令牌（至少 24 字符）')
-        node=dict(id=secrets.token_hex(8),name=name.strip(),url=validate_url(url),token=token)
+        host=access_host(body.get('accessHost',''))
+        node=dict(accessHost=host,id=secrets.token_hex(8),name=name.strip(),url=validate_url(url),token=token)
         self.request(node,'status') # Verify identity/permissions before saving.
         with self.lock:
             nodes=read('nodes.json',[])
@@ -43,6 +54,13 @@ class Nodes:
             if any(n['url']==node['url'] for n in nodes):raise ValueError('该节点地址已添加')
             write('nodes.json',nodes+[node])
         return node['id']
+    def set_access(self,body):
+        host=access_host(body.get('accessHost',''))
+        with self.lock:
+            items=read('nodes.json',[])
+            item=next((n for n in items if n['id']==body.get('id')),None)
+            if not item:raise NodeError('节点不存在')
+            item['accessHost']=host;write('nodes.json',items)
     def remove(self,ident):
         with self.lock:
             write('nodes.json',[n for n in read('nodes.json',[]) if n['id']!=ident]);self.cache.pop(ident,None)

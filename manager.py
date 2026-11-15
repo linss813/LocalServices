@@ -14,20 +14,24 @@ from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from urllib.parse import urlsplit,parse_qs
 import backends
 import catalog
+import web_access
 from monitor import Monitor
 from nodes import Nodes
 from storage import DATA,read,write,audit
 
 ROOT=Path(__file__).resolve().parent
-CONTROL={'action','create','logs'}
-ROUTES=CONTROL|{'rules','watch','ack','email-test','alias'}
+CONTROL={'action','create','logs','web-publish'}
+ROUTES=CONTROL|{'rules','watch','ack','email-test','alias','web-link'}
 
 class APIError(ValueError):pass
 
 def local_operation(monitor,path,body,allow_control):
     if path in CONTROL and not allow_control:raise APIError('该节点为只读监控；启停与日志访问需在代理显式启用 --allow-control')
+    created_bind=None
     if path=='action':backends.action(body)
-    elif path=='create':backends.create(body)
+    elif path=='create':
+        lan=(monitor.data or {}).get('webAccess',{}).get('lanAddresses',[])
+        prepared=web_access.web_command(body,lan);created_bind=prepared.get('webBind');backends.create(prepared)
     elif path=='rules':
         with monitor.lock:monitor.alerts.configure(body)
     elif path=='watch':
@@ -35,7 +39,7 @@ def local_operation(monitor,path,body,allow_control):
         with monitor.lock:
             rules=dict(monitor.alerts.rules);watched=set(rules['watched'])
             if body['enabled']:
-                if body.get('id') not in [s['id'] for s in (monitor.data or {}).get('services',[]) if s['kind']!='process']:raise ValueError('仅可监控已识别的服务')
+                if body.get('id') not in [s['id'] for s in (monitor.data or {}).get('services',[]) if s['kind'] not in ('process','socket')]:raise ValueError('仅可监控已识别的服务')
                 watched.add(body['id'])
             else:watched.discard(body.get('id'))
             rules['watched']=sorted(watched);monitor.alerts.configure(rules)
@@ -46,6 +50,21 @@ def local_operation(monitor,path,body,allow_control):
         with monitor.lock:
             data=monitor.data or {};valid={s.get('aliasId',s['id']) for s in data.get('services',[])}|{g['id'] for g in data.get('resources',[])}
             catalog.set_alias(body,valid);catalog.annotate(data)
+    elif path=='web-link':
+        entries=(monitor.data or {}).get('webAccess',{}).get('confirmed',[])
+        if body.get('key') not in [e['key'] for e in entries]:raise ValueError('Web 端口尚未识别或已停止')
+        links=read('web-links.json',{});url=web_access.validate_url(body.get('url',''))
+        if url:links[body['key']]=url
+        else:links.pop(body['key'],None)
+        write('web-links.json',links)
+        with monitor.lock:monitor.refresh_web()
+    elif path=='web-publish':
+        with monitor.lock:
+            access=(monitor.data or {}).get('webAccess',{})
+            entry=next((e for e in access.get('confirmed',[]) if e['key']==body.get('key')),None)
+            if body.get('enabled') is True and (not entry or body.get('pid')!=entry.get('pid') or body.get('created')!=entry.get('created')):raise ValueError('目标进程发生变化，请刷新后重新确认发布')
+            monitor.publications.configure(body,access.get('confirmed',[]),access.get('lanAddresses',[]),monitor.own_ports)
+            monitor.refresh_web()
     elif path=='logs':
         item=next((s for s in backends.configs() if 'custom:'+s['label']==body.get('id')),None)
         if not item:raise ValueError('仅支持自定义服务日志')
@@ -57,7 +76,7 @@ def local_operation(monitor,path,body,allow_control):
     if path in CONTROL:
         monitor.invalidate();monitor.detail_times.pop('sockets',None)
     audit(path+':'+str(body.get('action','')),body.get('id',''))
-    return {'ok':True}
+    return dict(ok=True,webBind=created_bind) if path=='create' else {'ok':True}
 
 class Handler(BaseHTTPRequestHandler):
     def setup(self):super().setup();self.connection.settimeout(20)
@@ -66,11 +85,12 @@ class Handler(BaseHTTPRequestHandler):
         zipped='gzip' in self.headers.get('Accept-Encoding','') and len(raw)>4096
         if zipped:raw=gzip.compress(raw,compresslevel=1)
         self.send_response(status);self.send_header('Content-Type',mime+'; charset=utf-8')
-        self.send_header('Cache-Control','no-store');self.send_header('X-Content-Type-Options','nosniff')
+        self.send_header('X-Local-Services','monitor');self.send_header('Cache-Control','no-store');self.send_header('X-Content-Type-Options','nosniff')
         if zipped:self.send_header('Content-Encoding','gzip')
         self.send_header('Content-Length',str(len(raw)))
         self.send_header('Content-Security-Policy',"default-src 'self'; script-src 'unsafe-inline' 'self'; style-src 'unsafe-inline' 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
-        self.end_headers();self.wfile.write(raw)
+        self.end_headers()
+        if self.command!='HEAD':self.wfile.write(raw)
     def is_agent(self):return self.server.mode=='agent'
     def authorize(self,write_request=False):
         if self.is_agent():
@@ -79,8 +99,9 @@ class Handler(BaseHTTPRequestHandler):
         return valid and self.headers.get('Sec-Fetch-Site')!='cross-site' and (not write_request or secrets.compare_digest(self.headers.get('X-Manager-Token',''),self.server.ui_token))
     def local_status(self):
         result=self.server.monitor.get();result['node']=dict(self.server.monitor.node)
-        result['capabilities']=dict(result.get('capabilities',{}),control=self.server.allow_control)
+        result['capabilities']=dict(result.get('capabilities',{}),control=self.server.allow_control,pythonExecutable=getattr(__import__('sys'),'_base_executable',__import__('sys').executable))
         return result
+    def do_HEAD(self):self.reply(405,{'error':'Use GET'})
     def do_GET(self):
         if not self.authorize():return self.reply(403,{'error':'认证或本机访问校验失败'})
         parsed=urlsplit(self.path);path=parsed.path;query=parse_qs(parsed.query)
@@ -96,8 +117,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(200,dict(nodes=nodes,mode=self.server.mode))
             if path=='/api/status':
                 ident=query.get('node',['local'])[0]
-                if ident=='local' and self.server.monitor:return self.reply(200,self.local_status())
-                return self.reply(200,self.server.nodes.status(ident))
+                if ident=='local' and self.server.monitor:
+                    result=self.local_status();result['accessContext']=dict(viewerLocal=True,accessHost='');return self.reply(200,result)
+                result=dict(self.server.nodes.status(ident));node=self.server.nodes.resolve(ident)
+                result['accessContext']=dict(viewerLocal=result.get('node',{}).get('id')==read('node.json',{}).get('id'),accessHost=node.get('accessHost',''))
+                return self.reply(200,result)
             self.reply(404,{'error':'未找到'})
         except Exception as exc:self.reply(502,{'error':str(exc)})
     def do_POST(self):
@@ -113,6 +137,7 @@ class Handler(BaseHTTPRequestHandler):
             if not parsed.path.startswith(prefix):return self.reply(404,{'error':'未找到'})
             with self.server.operations:
                 if not self.is_agent() and path=='node-add':return self.reply(200,{'id':self.server.nodes.add(body)})
+                if not self.is_agent() and path=='node-access':self.server.nodes.set_access(body);return self.reply(200,{'ok':True})
                 if not self.is_agent() and path=='node-remove':self.server.nodes.remove(body.get('id'));return self.reply(200,{'ok':True})
                 if path not in ROUTES:return self.reply(404,{'error':'未找到'})
                 ident=parse_qs(parsed.query).get('node',['local'])[0]
@@ -185,7 +210,7 @@ def main():
     if args.tls_cert:
         context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.minimum_version=ssl.TLSVersion.TLSv1_2
         context.load_cert_chain(args.tls_cert,args.tls_key);server.socket=context.wrap_socket(server.socket,server_side=True)
-    if server.monitor:server.monitor.start()
+    if server.monitor:server.monitor.own_ports.add(server.server_port);server.monitor.start()
     if args.local_agent:
         if args.mode!='console':parser.error('--local-agent 仅适用于 console 模式')
         if not any(n['url']==args.local_agent.rstrip('/') for n in server.nodes.list()):
@@ -195,7 +220,7 @@ def main():
     try:server.serve_forever()
     except KeyboardInterrupt:pass
     finally:
-        if server.monitor:server.monitor.stop_event.set()
+        if server.monitor:server.monitor.close()
         server.server_close()
         if server.monitor_lock:server.monitor_lock.close()
 

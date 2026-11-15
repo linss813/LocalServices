@@ -14,6 +14,7 @@ import backends
 from storage import SYSTEM, DATA, read, write, audit_tail
 from mailer import Mailer
 from catalog import annotate
+import web_access
 from volumes import summarize,mac_topology,mac_pools,device_metadata,aggregate_io
 
 DEFAULT_RULES=dict(cpu=90,memory=90,disk=90,networkMB=100,diskMB=200,serviceMemoryMB=2048,
@@ -169,11 +170,16 @@ def shutil_which(name):
 
 class Monitor:
     def __init__(self,interval=10,node=None):
+        self.own_ports={18765,18767};self.web_discovery=web_access.Discovery();self.publications=web_access.Publications();self.web_processes={}
         self.interval=interval;self.node=node or dict(id=socket.gethostname(),name=socket.gethostname())
         self.detail_cache={};self.detail_times={}
         self.lock=threading.RLock();self.data=None;self.error=None;self.history=deque(maxlen=120)
         self.previous={};self.proc_previous={};self.previous_time=None;self.native_time=0;self.native=[];self.native_warnings=[]
         self.alerts=Alerts();self.mailer=Mailer(self.node);self.firewall_time=0;self.firewall_data={};self.stop_event=threading.Event();self.ready=threading.Event()
+    def refresh_web(self):
+        if self.data:web_access.attach(self.data,self.web_discovery,self.publications,self.web_processes,self.own_ports)
+    def close(self):
+        self.stop_event.set();self.publications.close();self.web_discovery.pool.shutdown(wait=False,cancel_futures=True)
     def invalidate(self):self.native_time=0
     def start(self):
         self.mailer.start()
@@ -285,6 +291,12 @@ class Monitor:
             services.append(dict(id=f'process:{pid}',name=p['name'],kind='process',pid=pid,ports=sorted(set(ports)),autostart=None,
                 cpu=p['cpu'],memory=p['memory'],readRate=p['readRate'],writeRate=p['writeRate'],uptime=max(0,int(time.time()-p['created'])),
                 running=True,controllable=False,resourceId=owner.get(pid)))
+        for endpoint in endpoints:
+            if endpoint.get('pid') is not None:continue
+            services.append(dict(id=f"socket:{endpoint['protocol']}:{endpoint['address']}:{endpoint['port']}",
+                name=f"未归属 {endpoint['protocol']} :{endpoint['port']}",kind='socket',pid=None,ports=[endpoint['port']],autostart=None,
+                cpu=None,memory=None,readRate=None,writeRate=None,uptime=None,running=True,controllable=False,
+                resourceId=None,state='PID 受权限限制',systemDescription='当前权限无法读取端口的进程归属，只展示监听与 Web 信息。'))
         groups=sorted(groups.values(),key=lambda x:x['memory'],reverse=True)
         vm=psutil.virtual_memory();swap=psutil.swap_memory();disks=[];mounts=set();topology={};pools={}
         parts=self.cached('mounts',60,lambda:psutil.disk_partitions(all=False))
@@ -337,8 +349,10 @@ class Monitor:
         with self.lock:self.history.append(row)
         own=procs.get(os.getpid(),{})
         overhead=dict(pid=os.getpid(),cpu=own.get('cpu'),memory=own.get('memory'),collectMs=round((time.monotonic()-now)*1000,1),sampleInterval=self.interval,portsInterval=max(30,self.interval),servicesInterval=60,firewallInterval=300)
-        return dict(monitor=overhead,sampledAt=time.time(),platform=SYSTEM,services=services,resources=groups,host=host,network=network,storage=summarize(disks,pools),disks=disks,diskIO=diskIO,
+        result=dict(monitor=overhead,sampledAt=time.time(),platform=SYSTEM,services=services,resources=groups,host=host,network=network,storage=summarize(disks,pools),disks=disks,diskIO=diskIO,
             security=dict(exposed=[e for e in endpoints if e['exposed']],listeners=endpoints,firewall=self.firewall_data,elevated=elevated,
                 users=users,rootProcesses=sum(1 for p in procs.values() if p['username']=='root'),visibility='完整连接表' if connection_complete else '部分可见'),
             warnings=warnings,interval=elapsed,capabilities=dict(native={'Darwin':'launchd / Homebrew','Linux':'systemd 用户及系统服务','Windows':'Windows SCM / 计划任务'}.get(SYSTEM,'只读'),
                 processIO=any(p['readRate'] is not None for p in procs.values()),processNetwork=False))
+        self.web_processes={pid:dict(created=p['created']) for pid,p in procs.items()}
+        return web_access.attach(result,self.web_discovery,self.publications,self.web_processes,self.own_ports)

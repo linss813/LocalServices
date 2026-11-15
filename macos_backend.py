@@ -68,7 +68,38 @@ def snapshot():
         services.append(dict(id='brew:'+name, name=name, kind='brew', label=label,
             autostart=(AGENTS/(label+'.plist')).exists(), pid=pid,
             state='running' if pid else 'stopped'))
+    known = {s['label'] for s in services}
+    disabled = disabled_jobs()
+    for label, path in native_plists().items():
+        if label in known:
+            continue
+        job = jobs.get(label, {})
+        services.append(dict(id='launchd:'+label, name=label, label=label,
+            kind='launchd', pid=job.get('pid'),
+            autostart=label not in disabled,
+            state='running' if job.get('pid') else 'stopped',
+            exitCode=job.get('exitCode'), description='用户 LaunchAgent · '+str(path)))
     return {'services':services}
+
+def native_plists():
+    result = {}
+    for path in AGENTS.glob('*.plist'):
+        try:
+            doc = plistlib.loads(path.read_bytes())
+            label = doc.get('Label', '')
+            if label and not label.startswith(('com.apple.', 'homebrew.mxcl.', 'local.svcmanager.')):
+                result[label] = path
+        except (OSError, ValueError, plistlib.InvalidFileException):
+            continue
+    return result
+
+def disabled_jobs():
+    import re
+    try:
+        output = run(['launchctl', 'print-disabled', f'gui/{os.getuid()}'])
+        return set(re.findall(r'"([^"\n]+)"\s*=>\s*true', output))
+    except (ValueError, subprocess.TimeoutExpired):
+        return set()
 
 def plist_path(item):
     auto = AGENTS / (item['label']+'.plist')
@@ -86,6 +117,30 @@ def action(body):
     ident, op = body.get('id',''), body.get('action')
     if op not in ('start','stop','restart','autostart','delete'):
         raise ValueError('未知操作')
+    if ident.startswith('launchd:'):
+        label = ident[len('launchd:'):]
+        path = native_plists().get(label)
+        if not path:
+            raise ValueError('未找到用户 LaunchAgent')
+        target = f'gui/{os.getuid()}/'+label
+        if op == 'delete':
+            raise ValueError('已有 LaunchAgent 请在原应用中卸载')
+        if op == 'autostart':
+            if not isinstance(body.get('enabled'), bool):
+                raise ValueError('enabled 必须是布尔值')
+            run(['launchctl', 'enable' if body['enabled'] else 'disable', target])
+            return
+        loaded = label in launch_jobs()
+        if op == 'stop':
+            if loaded:
+                run(['launchctl', 'bootout', target])
+            return
+        if label in disabled_jobs():
+            raise ValueError('该服务已禁用，请先启用自启后启动')
+        if not loaded:
+            run(['launchctl', 'bootstrap', f'gui/{os.getuid()}', str(path)])
+        run(['launchctl', 'kickstart']+(['-k'] if op=='restart' and loaded else [])+[target])
+        return
     if ident.startswith('brew:'):
         name = ident[5:]
         if name not in [s['name'] for s in brew_services()]:
