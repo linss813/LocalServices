@@ -29,7 +29,7 @@ def validate_url(url):
     return url.rstrip('/')
 
 class Nodes:
-    def __init__(self):self.cache={};self.lock=threading.RLock();self.opener=build_opener(NoRedirect,ProxyHandler({}))
+    def __init__(self):self.cache={};self.node_locks={};self.lock=threading.RLock();self.opener=build_opener(NoRedirect,ProxyHandler({}))
     def list(self):return [dict(id=n['id'],name=n['name'],url=n['url']) for n in read('nodes.json',[])]
     def add(self,body):
         name=body.get('name','');token=body.get('token','');url=body.get('url','')
@@ -74,10 +74,13 @@ class Nodes:
             if isinstance(exc,NodeError):raise
             raise NodeError('无法连接监控节点，请检查服务、隧道和证书；未展示过期指标')
     def status(self,ident):
-        with self.lock:
-            cached=self.cache.get(ident)
-            if cached and time.monotonic()-cached[0]<2:return cached[1]
-            result=self.request(self.resolve(ident),'status');self.cache[ident]=(time.monotonic(),result)
+        with self.lock:lock=self.node_locks.setdefault(ident,threading.Lock())
+        with lock:
+            with self.lock:cached=self.cache.get(ident)
+            if cached and time.monotonic()-cached[0]<2:
+                return dict(cached[1],age=round(cached[1].get('age',0)+time.monotonic()-cached[0],1))
+            result=self.request(self.resolve(ident),'status')
+            with self.lock:self.cache[ident]=(time.monotonic(),result)
             return result
     def forward(self,ident,path,body):
         result=self.request(self.resolve(ident),path,body)

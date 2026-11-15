@@ -14,7 +14,7 @@ import backends
 from storage import SYSTEM, DATA, read, write, audit_tail
 from mailer import Mailer
 from catalog import annotate
-from volumes import summarize
+from volumes import summarize,mac_topology,mac_pools,device_metadata,aggregate_io
 
 DEFAULT_RULES=dict(cpu=90,memory=90,disk=90,networkMB=100,diskMB=200,serviceMemoryMB=2048,
                    sustain=30,diskSustain=120,recoverSustain=60,hysteresis=5,emailInterval=300,exposure=True,firewall=True,watched=[])
@@ -286,14 +286,22 @@ class Monitor:
                 cpu=p['cpu'],memory=p['memory'],readRate=p['readRate'],writeRate=p['writeRate'],uptime=max(0,int(time.time()-p['created'])),
                 running=True,controllable=False,resourceId=owner.get(pid)))
         groups=sorted(groups.values(),key=lambda x:x['memory'],reverse=True)
-        vm=psutil.virtual_memory();swap=psutil.swap_memory();disks=[];mounts=set()
-        for part in self.cached('mounts',60,lambda:psutil.disk_partitions(all=False)):
+        vm=psutil.virtual_memory();swap=psutil.swap_memory();disks=[];mounts=set();topology={};pools={}
+        parts=self.cached('mounts',60,lambda:psutil.disk_partitions(all=False))
+        if SYSTEM=='Darwin':
+            signature=tuple((p.device,p.mountpoint) for p in parts)
+            if signature!=self.detail_cache.get('diskSignature'):
+                self.detail_times.pop('diskTopology',None);self.detail_cache['diskSignature']=signature
+            try:topology=self.cached('diskTopology',300,mac_topology);pools=self.cached('apfsCapacity',30,mac_pools)
+            except (OSError,ValueError,subprocess.SubprocessError):warnings.append('APFS 容器或磁盘类型信息不可读，容量可能使用估算。')
+        for part in parts:
             if part.mountpoint in mounts:continue
             mounts.add(part.mountpoint)
             try:
                 usage=psutil.disk_usage(part.mountpoint)
                 auxiliary=SYSTEM=='Darwin' and part.mountpoint.startswith('/System/Volumes/') and not (part.mountpoint=='/System/Volumes/Data' or part.mountpoint.startswith('/System/Volumes/Data/'))
-                disks.append(dict(device=part.device,mount=part.mountpoint,fstype=part.fstype,total=usage.total,used=usage.used,free=usage.free,percent=usage.percent,fsId=str(os.stat(part.mountpoint).st_dev),readOnly='ro' in part.opts.split(','),alertable=not auxiliary and 'ro' not in part.opts.split(',') and part.fstype.lower() not in ('squashfs','iso9660','erofs')))
+                meta=device_metadata(part.device,part.mountpoint,SYSTEM,topology)
+                disks.append(dict(meta,device=part.device,mount=part.mountpoint,fstype=part.fstype,total=usage.total,used=usage.used,free=usage.free,percent=usage.percent,fsId=str(os.stat(part.mountpoint).st_dev),readOnly='ro' in part.opts.split(','),alertable=not auxiliary and 'ro' not in part.opts.split(',') and part.fstype.lower() not in ('squashfs','iso9660','erofs')))
             except (PermissionError,OSError):pass
         net_items=[];stats=self.cached('interfaceStats',60,psutil.net_if_stats);addresses=self.cached('addresses',60,psutil.net_if_addrs)
         for name,io in psutil.net_io_counters(pernic=True).items():
@@ -315,7 +323,7 @@ class Monitor:
             disk_devices.append(dict(name=name,readRate=self.counters('disk:'+name+':read',io.read_bytes,elapsed),
                 writeRate=self.counters('disk:'+name+':write',io.write_bytes,elapsed),reads=io.read_count,writes=io.write_count,
                 busy=min(100,busy_rate/10) if busy_rate is not None else None))
-        diskIO=dict(devices=disk_devices,readRate=sum_rate(disk_devices,'readRate'),writeRate=sum_rate(disk_devices,'writeRate'))
+        diskIO=aggregate_io(disk_devices,SYSTEM)
         if now-self.firewall_time>300 or not self.firewall_data:
             self.firewall_data=firewall();self.firewall_time=now
         try:users=[dict(name=u.name,host=u.host,started=u.started) for u in self.cached('users',60,psutil.users)]
@@ -329,7 +337,7 @@ class Monitor:
         with self.lock:self.history.append(row)
         own=procs.get(os.getpid(),{})
         overhead=dict(pid=os.getpid(),cpu=own.get('cpu'),memory=own.get('memory'),collectMs=round((time.monotonic()-now)*1000,1),sampleInterval=self.interval,portsInterval=max(30,self.interval),servicesInterval=60,firewallInterval=300)
-        return dict(monitor=overhead,sampledAt=time.time(),platform=SYSTEM,services=services,resources=groups,host=host,network=network,storage=summarize(disks),disks=disks,diskIO=diskIO,
+        return dict(monitor=overhead,sampledAt=time.time(),platform=SYSTEM,services=services,resources=groups,host=host,network=network,storage=summarize(disks,pools),disks=disks,diskIO=diskIO,
             security=dict(exposed=[e for e in endpoints if e['exposed']],listeners=endpoints,firewall=self.firewall_data,elevated=elevated,
                 users=users,rootProcesses=sum(1 for p in procs.values() if p['username']=='root'),visibility='完整连接表' if connection_complete else '部分可见'),
             warnings=warnings,interval=elapsed,capabilities=dict(native={'Darwin':'launchd / Homebrew','Linux':'systemd 用户及系统服务','Windows':'Windows SCM / 计划任务'}.get(SYSTEM,'只读'),
