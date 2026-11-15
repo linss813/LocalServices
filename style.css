@@ -40,3 +40,9 @@
 :root[data-theme="comfort"] .rank-row.focused,:root[data-theme="light"] .rank-row.focused{background:#e0e6d6}
 @media(max-width:760px){.donut{width:200px;height:200px}.trend-svg text{font-size:12px}}
 .offline-overlay .view,.offline-overlay .cards{display:none!important}
+:root[data-theme="comfort"] dialog,:root[data-theme="light"] dialog{color:#30372f}
+:root[data-theme="comfort"] dialog label,:root[data-theme="light"] dialog label,:root[data-theme="comfort"] dialog .check,:root[data-theme="light"] dialog .check{color:#364436}
+:root[data-theme="dark"] dialog{color:#dce3e8}
+dialog h2{font-size:1.15rem}dialog label{font-size:.95rem;font-weight:500}dialog .check{font-size:.9rem}dialog p{font-size:.85rem}
+#storageCapacity .bar{height:12px}#mountDetails{margin:20px 0;color:var(--muted);font-size:.9rem}#mountTable{margin-top:14px}.volume details{margin-top:12px;font-size:.8rem;color:var(--muted)}#rulesForm .form-grid{gap:0 18px}#rulesForm label{line-height:1.7}#rulesForm input{margin-top:5px}#rules{width:min(720px,94vw)}
+#deviceDetails{margin:22px 0;color:var(--muted);font-size:.9rem}#deviceDetails .tablewrap{margin-top:14px}

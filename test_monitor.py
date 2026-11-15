@@ -26,7 +26,7 @@ class Isolated(unittest.TestCase):
         for ip in ('127.0.0.1','127.5.3.1','::1'):self.assertFalse(monitor.external(ip))
         for ip in ('0.0.0.0','::','192.168.1.1','fe80::1%en0','*'):self.assertTrue(monitor.external(ip))
     def test_sustained_alert_recovery_and_ack(self):
-        engine=monitor.Alerts();d=self.sample()
+        engine=monitor.Alerts();engine.rules['recoverSustain']=0;d=self.sample()
         self.assertEqual(engine.evaluate(d,now=0,wall=100),[])
         self.assertEqual(engine.evaluate(d,now=29,wall=129),[])
         events=engine.evaluate(d,now=30,wall=130);self.assertEqual(len(events),1)
@@ -62,7 +62,7 @@ class Isolated(unittest.TestCase):
         e.evaluate(d,now=0,wall=1);d['security']['firewall']['state']='unknown'
         e.evaluate(d,now=100,wall=2);self.assertEqual(len(e.active),1)
     def test_readonly_disk_is_excluded_and_old_alert_is_suppressed(self):
-        engine=monitor.Alerts();d=self.sample();d['host']['cpu']=0
+        engine=monitor.Alerts();engine.rules['diskSustain']=0;d=self.sample();d['host']['cpu']=0
         d['disks']=[dict(mount='/snap/core',percent=100)]
         engine.evaluate(d,now=0,wall=1);self.assertEqual(len(engine.active),1)
         d['disks'][0]['alertable']=False
@@ -75,6 +75,40 @@ class Isolated(unittest.TestCase):
         event=dict(id='disk-event',title='Disk',detail='100%',time=100,recovered=None,level='warning')
         m.enqueue_events([event]);self.assertEqual(len(m.state['pending']),1)
         event.update(suppressed=True,recovered=200);m.enqueue_events([event]);self.assertFalse(m.state['pending'])
+    def test_filesystem_aliases_are_counted_once(self):
+        from volumes import summarize
+        rows=[dict(device='/dev/vda1',fsId='1',fstype='ext4',mount=m,total=1000,used=300,free=650,percent=31,alertable=True) for m in ('/','/tmp','/var/lib/agent')]
+        rows.append(dict(device='/dev/loop0',fsId='2',fstype='squashfs',mount='/snap/core',total=100,used=100,free=0,percent=100,alertable=False))
+        d=summarize(rows);self.assertEqual(d['total'],1000);self.assertEqual(d['free'],650);self.assertEqual(d['volumeCount'],1)
+        self.assertEqual(d['used'],350);self.assertEqual(d['percent'],35);self.assertEqual(len(d['volumes'][0]['mounts']),3)
+    def test_apfs_shared_capacity_is_not_summed(self):
+        from volumes import summarize
+        rows=[dict(device=device,fsId=str(i),fstype='apfs',mount=mount,total=1000,used=used,free=400,percent=50,alertable=True) for i,(device,mount,used) in enumerate([('/dev/disk3s1s1','/',50),('/dev/disk3s5','/System/Volumes/Data',500)])]
+        d=summarize(rows);self.assertEqual(d['total'],1000);self.assertEqual(d['used'],600);self.assertTrue(d['sharedPools'])
+    def test_disk_capacity_waits_before_firing(self):
+        e=monitor.Alerts();d=self.sample();d['host']['cpu']=0;d['disks']=[dict(mount='/',percent=95,free=5)]
+        self.assertFalse(e.evaluate(d,now=0,wall=1));self.assertFalse(e.evaluate(d,now=119,wall=120))
+        self.assertEqual(len(e.evaluate(d,now=120,wall=121)),1)
+    def test_hysteresis_and_stable_recovery_prevent_flapping(self):
+        e=monitor.Alerts();e.rules['sustain']=0;d=self.sample();e.evaluate(d,now=0,wall=1)
+        d['host']['cpu']=88;e.evaluate(d,now=100,wall=101);self.assertEqual(len(e.active),1)
+        d['host']['cpu']=80;e.evaluate(d,now=110,wall=111);e.evaluate(d,now=169,wall=170);self.assertEqual(len(e.active),1)
+        d['host']['cpu']=89;e.evaluate(d,now=170,wall=171);self.assertEqual(len(e.active),1)
+        d['host']['cpu']=80;e.evaluate(d,now=180,wall=181);e.evaluate(d,now=240,wall=241)
+        self.assertFalse(e.active);self.assertEqual(e.events[0]['recovered'],241)
+    def test_recovered_before_delivery_cancels_pending_email(self):
+        self.config_email();m=mailer.Mailer();event=dict(id='temporary',title='CPU',detail='95%',time=100,recovered=None,level='warning')
+        m.enqueue_events([event]);self.assertEqual(len(m.state['pending']),1)
+        event['recovered']=200;m.enqueue_events([event]);self.assertFalse(m.state['pending'])
+        m.enqueue_events([event]);self.assertFalse(m.state['pending']);self.assertIn('temporary:触发',m.state['dismissed'])
+    def test_email_interval_persists_and_critical_bypasses_it(self):
+        self.config_email();m=mailer.Mailer();event=dict(id='one',title='CPU',detail='95%',time=100,recovered=None,level='warning')
+        m.enqueue_events([event])
+        with patch.object(m,'send'):m.deliver()
+        restarted=mailer.Mailer();second=dict(event,id='two');restarted.enqueue_events([second])
+        with patch.object(restarted,'send') as send:restarted.deliver();send.assert_not_called()
+        critical=dict(event,id='urgent',level='critical');restarted.enqueue_events([critical])
+        with patch.object(restarted,'send') as send:restarted.deliver();self.assertEqual(send.call_args.args[1][0]['level'],'critical')
     def test_invalid_rules_are_atomic(self):
         e=monitor.Alerts();before=copy.deepcopy(e.rules)
         for value in (float('nan'),float('inf'),True,-1,101):

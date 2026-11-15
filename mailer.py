@@ -16,8 +16,8 @@ class Mailer:
         self.node=node or dict(id=socket.gethostname(),name=socket.gethostname())
         self.lock=threading.RLock();self.wake=threading.Event()
         self.state=read('mail-state.json',dict(sent=[],pending=[],last=None))
-        self.state.setdefault('sent',[]);self.state.setdefault('pending',[])
-        self.inflight=False;self.last_attempt=0
+        self.state.setdefault('sent',[]);self.state.setdefault('pending',[]);self.state.setdefault('dismissed',[])
+        self.inflight=False;self.inflight_keys=set();self.last_attempt=self.state.get("lastAttempt",0)
     def start(self):threading.Thread(target=self.loop,daemon=True).start()
     def public(self):
         cfg=read('email.json',{})
@@ -30,13 +30,21 @@ class Mailer:
         if not cfg.get('enabled'):return
         with self.lock:
             changed=False
-            known=set(self.state['sent'])|{x['key'] for x in self.state['pending']}
+            known=set(self.state['sent'])|set(self.state['dismissed'])|{x['key'] for x in self.state['pending']}
             for event in events:
                 if event.get('suppressed'):
                     pending=[item for item in self.state['pending'] if not item['key'].startswith(event['id']+':')]
                     if len(pending)!=len(self.state['pending']):self.state['pending']=pending;changed=True
                     continue
                 if event['time']<cfg.get('enabledAt',0):continue
+                trigger=event['id']+':触发'
+                if event.get('recovered') and trigger not in self.state['sent'] and trigger not in self.inflight_keys:
+                    keys={trigger,event['id']+':恢复'}
+                    pending=[item for item in self.state['pending'] if item['key'] not in keys]
+                    if len(pending)!=len(self.state['pending']):self.state['pending']=pending;changed=True
+                    if not keys.issubset(set(self.state['dismissed'])):
+                        self.state['dismissed']=(self.state['dismissed']+sorted(keys))[-2000:];changed=True
+                    continue
                 for state,stamp in [('触发',event['time']),('恢复',event.get('recovered'))]:
                     if not stamp:continue
                     key=event['id']+':'+state
@@ -77,13 +85,16 @@ class Mailer:
         if not cfg.get('enabled'):return
         now=time.time()
         with self.lock:
-            # Batch all ready incidents; at most one automatic delivery per minute.
+            # Ordinary email is rate-limited across restarts; critical alerts/tests bypass this interval.
             ready=[dict(x) for x in self.state['pending'] if x['next']<=now]
-            ready.sort(key=lambda x:(0 if x['state']=='测试' else 1 if x['level']=='critical' else 2,x['time']))
+            ready.sort(key=lambda x:(0 if x['state']=='测试' else 1 if x['level']=='critical' and x['state']=='触发' else 2,x['time']))
             def group(x):return (x.get('node',self.node)['id'],x['state'],x.get('category','监控'),x['level'])
             items=[x for x in ready if group(x)==group(ready[0])] if ready else []
-            if not items or self.inflight or (now-self.last_attempt<60 and not any(x['state']=='测试' for x in items)):return
-            self.inflight=True;self.last_attempt=now
+            interval=read('rules.json',{}).get('emailInterval',300)
+            priority=any(x['state']=='测试' or x['level']=='critical' and x['state']=='触发' for x in items)
+            if not items or self.inflight or (now-self.last_attempt<interval and not priority):return
+            self.inflight=True;self.inflight_keys={x['key'] for x in items};self.last_attempt=now
+            self.state['lastAttempt']=now;write('mail-state.json',self.state)
         error=None
         try:self.send(cfg,items)
         except Exception as exc:
@@ -102,7 +113,7 @@ class Mailer:
                 self.state['sent']=(self.state['sent']+list(keys))[-2000:]
                 self.state['pending']=[x for x in self.state['pending'] if x['key'] not in keys]
             self.state['last']=dict(time=time.time(),ok=not bool(error),detail=error or f'SMTP 服务器已接受 {len(items)} 条通知',count=len(items))
-            self.inflight=False;write('mail-state.json',self.state)
+            self.inflight=False;self.inflight_keys.clear();write('mail-state.json',self.state)
     def loop(self):
         while True:
             self.wake.wait(15);self.wake.clear()

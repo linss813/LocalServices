@@ -57,10 +57,11 @@ class Portable(unittest.TestCase):
             m=mailer.Mailer(dict(id='a',name='A'))
             events=[dict(id='cpu',key='cpu',title='CPU',detail='95%',level='warning',time=1,recovered=2,node=dict(id='a',name='A')),
                     dict(id='mem',key='memory',title='Memory',detail='95%',level='warning',time=3,recovered=None,node=dict(id='b',name='B'))]
+            m.state['sent']=['cpu:触发']
             m.enqueue_events(events)
             with patch.object(m,'send') as send:m.deliver()
             items=send.call_args.args[1];self.assertEqual(len(items),1)
-            self.assertEqual(len(m.state['pending']),2)
+            self.assertEqual(len(m.state['pending']),1)
 
 class AgentConsole(unittest.TestCase):
     @classmethod

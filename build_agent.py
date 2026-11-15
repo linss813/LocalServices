@@ -5,7 +5,7 @@ from pathlib import Path
 import zipfile
 
 FILES=('agent.py','manager.py','monitor.py','backends.py','macos_backend.py','storage.py','catalog.py','mailer.py',
-       'mail_template.py','nodes.py','service_runner.py','configure_email.py','requirements.txt','AGENT.md')
+       'mail_template.py','nodes.py','service_runner.py','configure_email.py','requirements.txt','AGENT.md','volumes.py')
 
 def build(output):
     root=Path(__file__).resolve().parent;output=Path(output).resolve();output.parent.mkdir(parents=True,exist_ok=True)

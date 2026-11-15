@@ -14,20 +14,21 @@ import backends
 from storage import SYSTEM, DATA, read, write, audit_tail
 from mailer import Mailer
 from catalog import annotate
+from volumes import summarize
 
 DEFAULT_RULES=dict(cpu=90,memory=90,disk=90,networkMB=100,diskMB=200,serviceMemoryMB=2048,
-                   sustain=30,exposure=True,firewall=True,watched=[])
+                   sustain=30,diskSustain=120,recoverSustain=60,hysteresis=5,emailInterval=300,exposure=True,firewall=True,watched=[])
 
 class Alerts:
     def __init__(self):
         self.rules=dict(DEFAULT_RULES,**read('rules.json',{}))
         self.events=deque(read('alerts.json',[])[-200:],maxlen=200)
         self.active={e['key']:e for e in self.events if not e.get('recovered')}
-        self.pending={key:time.monotonic() for key in self.active}
+        self.pending={key:time.monotonic() for key in self.active};self.recovery={}
     def configure(self,body):
         values={}
-        for key,lo,hi in [('cpu',1,100),('memory',1,100),('disk',1,100),('networkMB',.01,1000000),('diskMB',.01,1000000),('serviceMemoryMB',1,10000000),('sustain',0,3600)]:
-            value=body.get(key)
+        for key,lo,hi in [('cpu',1,100),('memory',1,100),('disk',1,100),('networkMB',.01,1000000),('diskMB',.01,1000000),('serviceMemoryMB',1,10000000),('sustain',0,3600),('diskSustain',0,3600),('recoverSustain',0,3600),('hysteresis',0,20),('emailInterval',60,86400)]:
+            value=body.get(key,self.rules.get(key))
             if isinstance(value,bool) or not isinstance(value,(int,float)) or not math.isfinite(value) or not lo<=value<=hi:raise ValueError(f'{key} 必须在 {lo} 到 {hi} 之间')
             values[key]=value
         for key in ('exposure','firewall'):
@@ -36,7 +37,7 @@ class Alerts:
         watched=body.get('watched',[])
         if not isinstance(watched,list) or len(watched)>500 or not all(isinstance(x,str) and len(x)<300 for x in watched):raise ValueError('服务监控列表无效')
         values['watched']=list(dict.fromkeys(watched))
-        self.rules=values;self.pending={key:time.monotonic() for key in self.active};write('rules.json',values)
+        self.rules=values;self.recovery.clear();self.pending={key:time.monotonic() for key in self.active};write('rules.json',values)
     def acknowledge(self,ident):
         for event in self.events:
             if event['id']==ident:
@@ -46,25 +47,28 @@ class Alerts:
         now=time.monotonic() if now is None else now
         wall=time.time() if wall is None else wall
         rules=self.rules;conditions={};observed=set()
-        def condition(key,trigger,title,detail,level='warning',immediate=False,target=''):
+        def condition(key,trigger,title,detail,level='warning',immediate=False,target='',delay=None):
             observed.add(key)
-            if trigger:conditions[key]=(title,detail,level,0 if immediate else rules['sustain'],target)
+            if trigger:conditions[key]=(title,detail,level,0 if immediate else rules['sustain'] if delay is None else delay,target)
+        def over(key,value,threshold,percentage=False):
+            recovery=threshold-rules['hysteresis'] if percentage else threshold*.9
+            return value>(max(0,recovery)) if key in self.active else value>=threshold
         h=snapshot['host']
-        condition('cpu',h['cpu']>=rules['cpu'],'CPU 持续高占用',f"主机 CPU {h['cpu']:.1f}% ≥ {rules['cpu']}%")
-        condition('memory',h['memoryPercent']>=rules['memory'],'内存持续高占用',f"内存 {h['memoryPercent']:.1f}% ≥ {rules['memory']}%")
-        for disk in snapshot['disks']:
+        condition('cpu',over('cpu',h['cpu'],rules['cpu'],True),'CPU 持续高占用',f"主机 CPU {h['cpu']:.1f}% ≥ {rules['cpu']}%")
+        condition('memory',over('memory',h['memoryPercent'],rules['memory'],True),'内存持续高占用',f"内存 {h['memoryPercent']:.1f}% ≥ {rules['memory']}%")
+        for disk in snapshot.get('storage',{}).get('volumes',snapshot['disks']):
             if not disk.get('alertable',True) and 'disk:'+disk['mount'] in self.active:
                 event=self.active['disk:'+disk['mount']];event['suppressed']=True;event['detail']='只读系统镜像不适用容量告警；已排除此项，原先的 100% 不是可写磁盘耗尽。'
-            condition('disk:'+disk['mount'],disk.get('alertable',True) and disk['percent']>=rules['disk'],'磁盘空间不足',f"{disk['mount']} 使用 {disk['percent']}%",immediate=True,target=disk['mount'])
+            condition('disk:'+disk['mount'],disk.get('alertable',True) and over('disk:'+disk['mount'],disk['percent'],rules['disk'],True),'磁盘空间不足',f"文件系统 {disk['mount']} 占用 {disk['percent']}%，可用 {disk.get('free',0)/1073741824:.2f} GiB；已合并重复挂载。",delay=rules['diskSustain'],target=disk['mount'])
         net=snapshot['network']
         rate=net['recvRate']+net['sentRate'] if net['recvRate'] is not None else None
-        if rate is not None:condition('network',rate>=rules['networkMB']*1048576,'网络流量持续偏高',f"收发合计 {(rate or 0)/1048576:.2f} MB/s")
+        if rate is not None:condition('network',over('network',rate,rules['networkMB']*1048576),'网络流量持续偏高',f"收发合计 {(rate or 0)/1048576:.2f} MB/s")
         io=snapshot['diskIO']
         rate=io['readRate']+io['writeRate'] if io['readRate'] is not None else None
-        if rate is not None:condition('io',rate>=rules['diskMB']*1048576,'磁盘 I/O 持续偏高',f"读写合计 {(rate or 0)/1048576:.2f} MB/s")
+        if rate is not None:condition('io',over('io',rate,rules['diskMB']*1048576),'磁盘 I/O 持续偏高',f"读写合计 {(rate or 0)/1048576:.2f} MB/s")
         for group in snapshot['resources']:
             if group['kind']=='process':continue
-            condition('rss:'+group['id'],group['memory']>=rules['serviceMemoryMB']*1048576,'服务内存持续偏高',f"{group.get('displayName',group['name'])} ({group['name']}) · {group['memory']/1048576:.0f} MB",target=group.get('displayName',group['name']))
+            condition('rss:'+group['id'],over('rss:'+group['id'],group['memory'],rules['serviceMemoryMB']*1048576),'服务内存持续偏高',f"{group.get('displayName',group['name'])} ({group['name']}) · {group['memory']/1048576:.0f} MB",target=group.get('displayName',group['name']))
         byid={s['id']:s for s in snapshot['services']}
         for s in snapshot['services']:
             if s['kind']!='process':observed.add('rss:'+s['id'])
@@ -80,17 +84,23 @@ class Alerts:
         if not rules['firewall'] or snapshot['security']['firewall']['state']!='unknown':condition('firewall',rules['firewall'] and snapshot['security']['firewall']['state']=='disabled','系统防火墙未启用',snapshot['security']['firewall']['detail'],immediate=True)
         changed=False
         for key,(title,detail,level,delay,target) in conditions.items():
+            self.recovery.pop(key,None)
             start=self.pending.setdefault(key,now)
             if key not in self.active and now-start>=delay:
                 event=dict(id=f'{time.time_ns()}-{len(self.events)}',key=key,title=title,detail=detail,level=level,target=target,
                     time=wall,recovered=None,acknowledged=False)
                 self.events.append(event);self.active[key]=event;changed=True
         for key in list(self.pending):
+            if key not in observed:self.recovery.pop(key,None)
             if key not in observed and key not in self.active:
                 del self.pending[key]
                 continue
             if key not in conditions and key in observed:
-                del self.pending[key]
+                disabled=(key=='firewall' and not rules['firewall']) or (key=='exposure' and not rules['exposure']) or (key.startswith('offline:') and key[8:] not in rules['watched'])
+                if key in self.active and not disabled and not self.active[key].get('suppressed'):
+                    start=self.recovery.setdefault(key,now)
+                    if now-start<rules['recoverSustain']:continue
+                self.pending.pop(key,None);self.recovery.pop(key,None)
                 if key in self.active:
                     self.active.pop(key)['recovered']=wall;changed=True
         if changed:write('alerts.json',list(self.events))
@@ -282,7 +292,8 @@ class Monitor:
             mounts.add(part.mountpoint)
             try:
                 usage=psutil.disk_usage(part.mountpoint)
-                disks.append(dict(device=part.device,mount=part.mountpoint,fstype=part.fstype,total=usage.total,used=usage.used,free=usage.free,percent=usage.percent,readOnly='ro' in part.opts.split(','),alertable='ro' not in part.opts.split(',') and part.fstype.lower() not in ('squashfs','iso9660','erofs')))
+                auxiliary=SYSTEM=='Darwin' and part.mountpoint.startswith('/System/Volumes/') and not (part.mountpoint=='/System/Volumes/Data' or part.mountpoint.startswith('/System/Volumes/Data/'))
+                disks.append(dict(device=part.device,mount=part.mountpoint,fstype=part.fstype,total=usage.total,used=usage.used,free=usage.free,percent=usage.percent,fsId=str(os.stat(part.mountpoint).st_dev),readOnly='ro' in part.opts.split(','),alertable=not auxiliary and 'ro' not in part.opts.split(',') and part.fstype.lower() not in ('squashfs','iso9660','erofs')))
             except (PermissionError,OSError):pass
         net_items=[];stats=self.cached('interfaceStats',60,psutil.net_if_stats);addresses=self.cached('addresses',60,psutil.net_if_addrs)
         for name,io in psutil.net_io_counters(pernic=True).items():
@@ -318,7 +329,7 @@ class Monitor:
         with self.lock:self.history.append(row)
         own=procs.get(os.getpid(),{})
         overhead=dict(pid=os.getpid(),cpu=own.get('cpu'),memory=own.get('memory'),collectMs=round((time.monotonic()-now)*1000,1),sampleInterval=self.interval,portsInterval=max(30,self.interval),servicesInterval=60,firewallInterval=300)
-        return dict(monitor=overhead,sampledAt=time.time(),platform=SYSTEM,services=services,resources=groups,host=host,network=network,disks=disks,diskIO=diskIO,
+        return dict(monitor=overhead,sampledAt=time.time(),platform=SYSTEM,services=services,resources=groups,host=host,network=network,storage=summarize(disks),disks=disks,diskIO=diskIO,
             security=dict(exposed=[e for e in endpoints if e['exposed']],listeners=endpoints,firewall=self.firewall_data,elevated=elevated,
                 users=users,rootProcesses=sum(1 for p in procs.values() if p['username']=='root'),visibility='完整连接表' if connection_complete else '部分可见'),
             warnings=warnings,interval=elapsed,capabilities=dict(native={'Darwin':'launchd / Homebrew','Linux':'systemd 用户及系统服务','Windows':'Windows SCM / 计划任务'}.get(SYSTEM,'只读'),
